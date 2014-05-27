@@ -135,7 +135,7 @@ Since we suppose to be on the same link with the router, ARP takes place first:
 1) The VM wants to know the GW_MAC. Since the traffic is routed we do proxy ARP.
 
  - ARP, Request who-has GW_IP tell IP
- - ARP, Reply GW_IP is-at TAP_MAC ``echo 1 > /proc/sys/net/conf/TAP/proxy_arp``
+ - ARP, Reply GW_IP is-at TAP_MAC ``echo 1 > /proc/sys/net/ipv4/conf/TAP/proxy_arp``
  - So `arp -na` inside the VM shows: ``(GW_IP) at TAP_MAC [ether] on eth0``
 
 2) The host wants to know the GW_MAC. Since the node does **not** have an IP
@@ -193,7 +193,7 @@ via simple L3 routing. We assume the following:
 3) Host to VM traffic:
 
  - Impossible if the VM resides in the host
- - If router is also VMC there is a rule for it: ``ip rule to SUBNET lookup TABLE``
+ - If router is also VMC there is a rule for it: ``ip rule add to SUBNET lookup TABLE``
  - Otherwise there is a route for it: ``ip route add SUBNET dev DEV``
 
 IPv6

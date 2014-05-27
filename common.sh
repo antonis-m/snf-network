@@ -143,6 +143,33 @@ function clear_ebtables {
   runlocked $RUNLOCKED_OPTS ebtables -X $TO
 }
 
+function clear_ofctl {
+
+  LINK2=`ovs-vsctl iface-to-br $INTERFACE`
+  LINE=`ovs-ofctl show $LINK2 | grep "($INTERFACE)"`
+  PORT=${LINE%%(*}
+  PORT="${PORT#"${PORT%%[![:space:]]*}"}"
+  RULE=`ovs-ofctl dump-flows $LINK2 | grep "output:$PORT"`
+  if [ -n "$RULE" ]; then
+    ACTIONS=${RULE##*actions=}
+    if [ -n "$ACTIONS" ]; then
+      ACTIONS="$ACTIONS,"
+      DL_DST="${RULE%%/ff:*}"
+      DL_DST="${DL_DST##*dl_dst=}"
+      NEW_ACTIONS=${ACTIONS/output:$PORT,/}
+      if [ -n "$NEW_ACTIONS" ]; then
+        ovs-ofctl add-flow $LINK2 "dl_dst=$DL_DST/$MAC_MASK,priority=1000,actions=$NEW_ACTIONS"
+      else 
+        ovs-ofctl del-flows $LINK2 "dl_dst=$DL_DST/$MAC_MASK"
+      fi
+    else
+      ovs-ofctl del-flows $LINK2 "dl_dst=$DL_DST/$MAC_MASK"
+    fi
+  fi
+  ovs-ofctl del-flows $LINK2 "in_port=$PORT"
+  ovs-vsctl del-port  $INTERFACE
+
+}
 
 function clear_nfdhcpd {
 
@@ -167,8 +194,8 @@ function routed_setup_ipv4 {
 	# static route mapping IP -> INTERFACE
 	save ip route replace $IP proto static dev $INTERFACE table $TABLE
 
-  # Do not allow packets with different source IP
-  save iptables -A FORWARD -i $INTERFACE ! -s $IP -j DROP -m comment --comment "snf-network_routed"
+	# Do not allow packets with different source IP
+	save iptables -A FORWARD -i $INTERFACE ! -s $IP -j DROP -m comment --comment "snf-network_routed"
 
 	# Enable proxy ARP
 	echo 1 > /proc/sys/net/ipv4/conf/$INTERFACE/proxy_arp
@@ -307,6 +334,37 @@ function setup_masq {
   # runlocked $RUNLOCKED_OPTS ebtables -A INPUT -i $INTERFACE -j $FROM
   # runlocked $RUNLOCKED_OPTS ebtables -A OUTPUT -o $INTERFACE -j $TO
   return
+
+}
+
+function setup_ofctl {
+
+  # track port
+  # block all traffic except for the traffic we specifically allow to pass
+  # allow broadcast arp messages within private network
+  # create flow that only allows src mac to be the only source mac address of frames
+  # create flow that sends packets with dst mac within a given mac prefix out specific ports
+  LINE=`ovs-ofctl show $LINK | grep "($INTERFACE)"`
+  PORT=${LINE%%(*}
+  PORT="${PORT#"${PORT%%[![:space:]]*}"}" 
+  if [ -n "$NETWORK_MAC_PREFIX" ]; then
+    OUT=`ovs-ofctl dump-flows $LINK | grep dl_dst=$NETWORK_MAC_PREFIX:00:00:00`
+    PORT_EXISTS=`echo $OUT | grep "output:$PORT,"`
+    if [ -z "$OUT" ]; then
+      OUT="output:$PORT"
+    elif [ -z $PORT_EXISTS ];then 
+      OUT="${OUT##*actions=},output:$PORT"
+    else
+      OUT="${OUT##*actions=}"
+    fi
+    ovs-ofctl add-flow $LINK "in_port=$PORT,dl_src=$MAC,dl_dst=ff:ff:ff:ff:ff:ff,priority=1000,actions=normal"
+    ovs-ofctl add-flow $LINK "in_port=$PORT,dl_src=$MAC,priority=1000,actions=normal"
+    ovs-ofctl add-flow $LINK "dl_dst=$NETWORK_MAC_PREFIX:0:0:0/$MAC_MASK,priority=1000,actions=$OUT"
+  else 
+    ovs-ofctl add-flow $LINK "in_port=$PORT,dl_src=$MAC,dl_dst=ff:ff:ff:ff:ff:ff,priority=1000,actions=normal"
+    ovs-ofctl add-flow $LINK "in_port=$PORT,dl_src=$MAC,dl_dst=$MAC/$MAC_MASK,priority=1000,actions=normal"
+  fi  
+  ovs-ofctl add-flow $LINK "priority=0,actions=drop"
 
 }
 

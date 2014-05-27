@@ -47,17 +47,35 @@ try clear_routed_setup_ipv6
 try clear_routed_setup_firewall
 try clear_bridged_setup_firewall
 try clear_ebtables
+try clear_ofctl
 try clear_nfdhcpd
 try clear_save
 
 init_save
 
+OVS_MODULE=`lsmod | grep openvswitch`
+if [ -z "$VLAN" ]; then
+  VLAN=0
+fi
+ 
 if [ "$MODE" = "routed" ]; then
   ip link set $INTERFACE addr $TAP_CONSTANT_MAC up
 elif [ "$MODE" = "bridged" ]; then
-  ip link set $INTERFACE up
-  brctl addif $BRIDGE $INTERFACE
-  try bridged_setup_firewall
+  if [ -n "$OVS_MODULE" ]; then
+     OVS_TEST=`ovs-vsctl show | grep $LINK`
+     if [ -n "$OVS_TEST" ]; then
+       ip link set $INTERFACE up
+       ovs-vsctl add-port $LINK $INTERFACE tag=$VLAN       
+     else
+       ip link set $INTERFACE up
+       brctl addif $BRIDGE $INTERFACE
+       try bridged_setup_firewall
+     fi  
+  else
+     ip link set $INTERFACE up
+     brctl addif $BRIDGE $INTERFACE
+     try bridged_setup_firewall
+  fi
 fi
 
 for tag in $NETWORK_TAGS; do
@@ -72,8 +90,18 @@ for tag in $NETWORK_TAGS; do
     try setup_nfdhcpd
   ;;
   $MAC_FILTERED_TAG)
-    try init_ebtables
-    try setup_ebtables
+    if [ -z "$OVS_MODULE" ]; then
+      try init_ebtables
+      try setup_ebtables
+    else
+      OVS_TEST=`ovs-vsctl show | grep $LINK`
+      if [ -n "$OVS_TEST" ]; then
+        try setup_ofctl
+      else
+        try init_ebtables
+        try setup_ebtables
+      fi
+    fi
   ;;
   $MASQ_TAG)
     try setup_masq
