@@ -145,29 +145,37 @@ function clear_ebtables {
 
 function clear_ofctl {
 
-  LINK2=`ovs-vsctl iface-to-br $INTERFACE`
-  LINE=`ovs-ofctl show $LINK2 | grep "($INTERFACE)"`
+  LINK2=$(ovs-vsctl iface-to-br $INTERFACE)
+  LINE=$(ovs-ofctl show $LINK2 | grep "($INTERFACE)")
   PORT=${LINE%%(*}
   PORT="${PORT#"${PORT%%[![:space:]]*}"}"
-  RULE=`ovs-ofctl dump-flows $LINK2 | grep "output:$PORT"`
-  if [ -n "$RULE" ]; then
-    ACTIONS=${RULE##*actions=}
-    if [ -n "$ACTIONS" ]; then
-      ACTIONS="$ACTIONS,"
-      DL_DST="${RULE%%/ff:*}"
-      DL_DST="${DL_DST##*dl_dst=}"
-      NEW_ACTIONS=${ACTIONS/output:$PORT,/}
-      if [ -n "$NEW_ACTIONS" ]; then
-        ovs-ofctl add-flow $LINK2 "dl_dst=$DL_DST/$MAC_MASK,priority=1000,actions=$NEW_ACTIONS"
-      else 
-        ovs-ofctl del-flows $LINK2 "dl_dst=$DL_DST/$MAC_MASK"
-      fi
-    else
-      ovs-ofctl del-flows $LINK2 "dl_dst=$DL_DST/$MAC_MASK"
-    fi
-  fi
   ovs-ofctl del-flows $LINK2 "in_port=$PORT"
   ovs-vsctl del-port  $INTERFACE
+  RULE=$(ovs-ofctl dump-flows $LINK2 | grep "priority=10" | grep "output:${PORT}")
+  IN_RULES=$(ovs-ofctl dump-flows $LINK2 | grep "output:${PORT}")
+  if [ -n "$RULE" ]; then
+    ACTIONS=${RULE##*actions=}
+    ACTIONS="$ACTIONS,"
+    NEW_ACTIONS=${ACTIONS/output:$PORT,/}
+    if [ -n $NEW_ACTIONS ]; then
+      DL_DST="${RULE%%/ff:*}"
+      DL_DST="${DL_DST##*dl_dst=}"
+      ovs-ofctl add-flow "$LINK" "dl_dst=${DL_DST}/${MAC_MASK},priority=10,actions=${NEW_ACTIONS}"
+      for i in $IN_RULES; do
+         $IN_PORT=$(echo $i | grep 'in_port') 
+         if [ -n $IN_PORT ]; then
+           $IN_PORT=${i%%,*}
+           $IN_PORT=${IN_PORT##in_port=}
+           $DL_SRC=${i%%dl_dst*}
+           $DL_SRC=${i##*dl_src}
+           OUT=${NEW_ACTIONS/output:$IN_PORT,/}
+           ovs-ofctl add-flow $LINK2 "in_port=$IN_PORT,dl_src=$DL_SRC,dl_dst=$DL_DST/$MAC_MASK,priority=1000,actions=$OUT"          
+         fi    
+      done
+    else
+      ovs-ofctl del-flows $LINK2 "dl_dst=$DL_DST/ff:ff:ff:00:00:00"
+    fi
+  fi
 
 }
 
@@ -337,29 +345,65 @@ function setup_masq {
 
 }
 
+function init_ofctl {
+
+  # find egress port
+  # egress port is the non-tap interface
+  # include this port in the ports that output traffic for mac-prefix if it doesn't exist already
+
+  IFACES=$(ovs-vsctl list-ifaces $LINK)
+  ARRAY=$(echo $IFACES | tr " " "\n")
+  for IFACE in $ARRAY; do
+    if [ -n "${IFACE##tap*}" ]; then
+      EGRESS=$IFACE
+    fi;
+  done
+  LINE=$(ovs-ofctl show $LINK | grep "($EGRESS)")
+  PORT=${LINE%%(*}
+  PORT="${PORT#"${PORT%%[![:space:]]*}"}"
+  if [ -n "$NETWORK_MAC_PREFIX" ]; then  
+    RULE=$(ovs-ofctl dump-flows $LINK | grep "priority=10" | grep "dl_dst=${NETWORK_MAC_PREFIX}0:00:00:00")
+    PORT_EXISTS=$(echo $RULE | grep "output:${PORT}")
+    if [ -z "$RULE" ];then 
+      OUT="output:$PORT"      
+      ovs-ofctl add-flow "$LINK" "dl_dst=${NETWORK_MAC_PREFIX}0:00:00:00/${MAC_MASK},priority=10,actions=${OUT}"      
+    elif [ -z "$PORT_EXISTS" ]; then
+      OUT="${RULE##*actions=},output:$PORT"
+      OUTL=${RULE##*actions=}
+      if [ -n "$OUT" ]; then
+        ovs-ofctl add-flow "$LINK" "in_port="$PORT",dl_dst=${NETWORK_MAC_PREFIX}0:00:00:00/${MAC_MASK},priority=1000,actions=${OUTL}"
+      fi
+      ovs-ofctl add-flow "$LINK" "dl_dst=${NETWORK_MAC_PREFIX}0:00:00:00/${MAC_MASK},priority=10,actions=${OUT}"
+    fi
+    ovs-ofctl add-flow "$LINK" "in_port=${PORT},dl_dst=ff:ff:ff:ff:ff:ff,priority=1000,actions=normal"
+  fi
+
+}
+
 function setup_ofctl {
 
   # track port
   # block all traffic except for the traffic we specifically allow to pass
   # allow broadcast arp messages within private network
   # create flow that only allows src mac to be the only source mac address of frames
-  # create flow that sends packets with dst mac within a given mac prefix out specific ports
+  # create flow that only allows dst mac to have given mac prefix
   LINE=`ovs-ofctl show $LINK | grep "($INTERFACE)"`
   PORT=${LINE%%(*}
   PORT="${PORT#"${PORT%%[![:space:]]*}"}" 
   if [ -n "$NETWORK_MAC_PREFIX" ]; then
-    OUT=`ovs-ofctl dump-flows $LINK | grep dl_dst=$NETWORK_MAC_PREFIX:00:00:00`
-    PORT_EXISTS=`echo $OUT | grep "output:$PORT,"`
-    if [ -z "$OUT" ]; then
+    RULE=$(ovs-ofctl dump-flows $LINK | grep "priority=10")  #dl_dst=${NETWORK_MAC_PREFIX}0:00:00:00
+    PORT_EXISTS=$(echo $RULE | grep "output:$PORT") #,
+    if [ -z "$RULE" ]; then
       OUT="output:$PORT"
-    elif [ -z $PORT_EXISTS ];then 
-      OUT="${OUT##*actions=},output:$PORT"
+    elif [ -z $PORT_EXISTS ]; then 
+      OUT="${RULE##*actions=},output:$PORT"
     else
-      OUT="${OUT##*actions=}"
+      OUT="${RULE##*actions=}"
     fi
+    OUTL=${OUT/output:$PORT,/}
     ovs-ofctl add-flow $LINK "in_port=$PORT,dl_src=$MAC,dl_dst=ff:ff:ff:ff:ff:ff,priority=1000,actions=normal"
-    ovs-ofctl add-flow $LINK "in_port=$PORT,dl_src=$MAC,priority=1000,actions=normal"
-    ovs-ofctl add-flow $LINK "dl_dst=$NETWORK_MAC_PREFIX:0:0:0/$MAC_MASK,priority=1000,actions=$OUT"
+    ovs-ofctl add-flow $LINK "in_port=${PORT},dl_src=${MAC},dl_dst=${NETWORK_MAC_PREFIX}0:00:00:00/$MAC_MASK,priority=1000,actions=$OUTL"
+    ovs-ofctl add-flow $LINK "dl_dst=${NETWORK_MAC_PREFIX}0:00:00:00/$MAC_MASK,priority=10,actions=$OUT"
   else 
     ovs-ofctl add-flow $LINK "in_port=$PORT,dl_src=$MAC,dl_dst=ff:ff:ff:ff:ff:ff,priority=1000,actions=normal"
     ovs-ofctl add-flow $LINK "in_port=$PORT,dl_src=$MAC,dl_dst=$MAC/$MAC_MASK,priority=1000,actions=normal"

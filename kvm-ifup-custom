@@ -53,7 +53,7 @@ try clear_save
 
 init_save
 
-OVS_MODULE=`lsmod | grep openvswitch`
+OVS_MODULE=$(lsmod | grep openvswitch)
 if [ -z "$VLAN" ]; then
   VLAN=0
 fi
@@ -62,7 +62,7 @@ if [ "$MODE" = "routed" ]; then
   ip link set $INTERFACE addr $TAP_CONSTANT_MAC up
 elif [ "$MODE" = "bridged" ]; then
   if [ -n "$OVS_MODULE" ]; then
-     OVS_TEST=`ovs-vsctl show | grep $LINK`
+     OVS_TEST=$(ovs-vsctl show | grep $LINK)
      if [ -n "$OVS_TEST" ]; then
        ip link set $INTERFACE up
        ovs-vsctl add-port $LINK $INTERFACE tag=$VLAN       
@@ -94,8 +94,9 @@ for tag in $NETWORK_TAGS; do
       try init_ebtables
       try setup_ebtables
     else
-      OVS_TEST=`ovs-vsctl show | grep $LINK`
+      OVS_TEST=$(ovs-vsctl show | grep $LINK)
       if [ -n "$OVS_TEST" ]; then
+        try init_ofctl
         try setup_ofctl
       else
         try init_ebtables
